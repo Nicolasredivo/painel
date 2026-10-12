@@ -1,9 +1,9 @@
 // Dados 100% inventados. Rodar: node --test tests/
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { consolidar, resultado } from '../js/calc.js';
+import { consolidar, resultado, entradasNaoExplicadas } from '../js/calc.js';
 import { parseCSV, parseNumero, parseData, detectarColunas, converter, classificarAtivo, classificarTipo, separarTabelas, converterTabelas, lerSaldos, conciliarSaldos } from '../js/csv.js';
-import { validarBtc, validarEth } from '../js/net.js';
+import { validarBtc, validarEth, extrairEntradas } from '../js/net.js';
 import * as cofre from '../js/vault.js';
 
 const L = (o) => ({ taxaBRL: 0, taxaQtd: 0, valor: 0, ...o });
@@ -311,4 +311,63 @@ test('depois de sacar quase tudo, a taxa ainda é reconhecida (tolerância sobre
   const { taxas, avisos } = conciliarSaldos(itens, { ETH: 0 });
   assert.equal(avisos.length, 0);
   assert.equal(taxas[0].qtd, 0.0005);
+});
+
+// ---------- entradas na Trezor ----------
+const MEU = '0xMinhaCarteira';
+const txEth = (o) => ({
+  txid: '0xt', blockTime: 1731291791, confirmations: 100, value: '1000',
+  vin: [{ addresses: ['0xOutro'] }], vout: [{ addresses: [MEU], isOwn: true, value: '4132730000000000' }],
+  ethereumSpecific: { status: 1 }, ...o,
+});
+
+test('extrai só o que chegou: confirmado, sem gasto próprio e sem falha', () => {
+  const e = extrairEntradas([
+    txEth({ txid: '0xok' }),
+    txEth({ txid: '0xpendente', confirmations: 0 }),
+    txEth({ txid: '0xfalhou', ethereumSpecific: { status: 0 } }),
+    txEth({ txid: '0xenvio', vin: [{ addresses: [MEU], isOwn: true }], vout: [{ addresses: ['0xOutro'], value: '5' }] }),
+  ], 'ETH', MEU);
+  assert.equal(e.length, 1);
+  assert.equal(e[0].txid, '0xok');
+  assert.equal(e[0].qtd, 0.00413273);
+  assert.equal(e[0].ts, 1731291791000);
+});
+
+test('BTC por xpub: soma as saídas marcadas como suas e ignora troco de envio', () => {
+  const entrou = { txid: 'b1', blockTime: 1765758274, confirmations: 10, vin: [{ addresses: ['bc1outro'] }],
+    vout: [{ addresses: ['bc1a'], isOwn: true, value: '30000' }, { addresses: ['bc1b'], isOwn: true, value: '20000' }, { addresses: ['bc1terceiro'], value: '99' }] };
+  const enviou = { txid: 'b2', blockTime: 1765758999, confirmations: 10, vin: [{ addresses: ['bc1a'], isOwn: true }],
+    vout: [{ addresses: ['bc1c'], isOwn: true, value: '7000' }, { addresses: ['bc1terceiro'], value: '1000' }] };
+  const e = extrairEntradas([entrou, enviou], 'BTC', 'xpubQualquer');
+  assert.equal(e.length, 1);
+  assert.equal(e[0].qtd, 0.0005);
+});
+
+test('entrada explicada por saque some; a que o extrato não explica aparece; depois de contada, some', () => {
+  const lancs = [{ id: 's1', tipo: 'saque', ativo: 'BTC', data: '2025-12-14T00:00:00.000Z', qtd: 0.0005, taxaQtd: 0 }];
+  const explicada = { txid: 'tA', ts: 1765758274000, qtd: 0.0005 };
+  const externa = { txid: 'tB', ts: 1731291791000, qtd: 0.00413273 };
+  assert.deepEqual(entradasNaoExplicadas([explicada], lancs, 'BTC'), []);
+  const sobra = entradasNaoExplicadas([externa, explicada], lancs, 'BTC');
+  assert.equal(sobra.length, 1);
+  assert.equal(sobra[0].txid, 'tB');
+  // quem já foi contado (id t:<txid>) não aparece de novo
+  assert.equal(entradasNaoExplicadas([externa], [...lancs, { id: 't:tB', tipo: 'deposito', ativo: 'BTC' }], 'BTC').length, 0);
+});
+
+test('saque com taxa descontada (chega até 2% a menos) ainda casa; chegada bem menor não casa', () => {
+  const lancs = [{ id: 's1', tipo: 'saque', ativo: 'ETH', data: '2025-01-01T00:00:00.000Z', qtd: 0.05, taxaQtd: 0 }];
+  assert.equal(entradasNaoExplicadas([{ txid: 'x', ts: 1, qtd: 0.0495 }], lancs, 'ETH').length, 0);
+  assert.equal(entradasNaoExplicadas([{ txid: 'y', ts: 1, qtd: 0.04 }], lancs, 'ETH').length, 1);
+});
+
+test('entrada contada vira depósito e entra no total (sem custo, ou com custo se informado)', () => {
+  const dep = (extra) => ({ id: 't:x', tipo: 'deposito', ativo: 'ETH', data: '2024-11-11T02:23:11.000Z', qtd: 0.00413273, taxaBRL: 0, taxaQtd: 0, origem: 'trezor', ...extra });
+  const sem = consolidar([dep({ valor: 0, semCusto: true })], 'ETH');
+  assert.equal(sem.qtd, 0.00413273);
+  assert.equal(sem.qtdSemCusto, 0.00413273);
+  const com = consolidar([dep({ valor: 80, semCusto: false })], 'ETH');
+  assert.equal(com.custo, 80);
+  assert.ok(Math.abs(com.precoMedio - 80 / 0.00413273) < 1e-6);
 });

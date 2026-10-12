@@ -35,7 +35,7 @@ function umaConsulta(url, descriptor, ativo, timeoutMs) {
     const fim = (fn, v) => { clearTimeout(t); try { ws.close(); } catch { /* já fechado */ } fn(v); };
     const t = setTimeout(() => fim(reject, new Error('tempo esgotado')), timeoutMs);
     try { ws = new WebSocket(url); } catch (e) { clearTimeout(t); return reject(e); }
-    ws.onopen = () => ws.send(JSON.stringify({ id: '1', method: 'getAccountInfo', params: { descriptor, details: 'basic' } }));
+    ws.onopen = () => ws.send(JSON.stringify({ id: '1', method: 'getAccountInfo', params: { descriptor, details: 'txs', pageSize: 40, page: 1 } }));
     ws.onerror = () => fim(reject, new Error('sem conexão'));
     ws.onmessage = (m) => {
       let d;
@@ -47,10 +47,28 @@ function umaConsulta(url, descriptor, ativo, timeoutMs) {
         pendente: Number(BigInt(d.unconfirmedBalance || '0')) / k,
         pendentesQtd: d.unconfirmedTxs || 0,
         txs: d.txs || 0,
+        entradas: extrairEntradas(d.transactions || [], ativo, descriptor),
         ts: Date.now(),
       });
     };
   });
+}
+
+// Do histórico devolvido pelo servidor, separa só o que CHEGOU na carteira: transação já confirmada, que não
+// gastou nada da própria carteira (envio e troco ficam de fora) e que não falhou. Soma o que caiu em endereços seus.
+export function extrairEntradas(transacoes, ativo, descriptor) {
+  const k = DIVISOR[ativo];
+  const alvo = String(descriptor).toLowerCase();
+  const meu = (o) => o.isOwn || (o.addresses || []).some((a) => String(a).toLowerCase() === alvo);
+  const entradas = [];
+  for (const t of transacoes) {
+    if (!t.blockTime || !(t.confirmations > 0)) continue;
+    if (ativo === 'ETH' && t.ethereumSpecific && t.ethereumSpecific.status !== 1) continue;
+    if ((t.vin || []).some(meu)) continue;
+    const recebido = (t.vout || []).filter(meu).reduce((s, o) => s + BigInt(o.value || '0'), 0n);
+    if (recebido > 0n) entradas.push({ txid: t.txid, ts: t.blockTime * 1000, qtd: Number(recebido) / k });
+  }
+  return entradas;
 }
 
 export async function consultarSaldo(ativo, descriptor, timeoutMs = 15000) {

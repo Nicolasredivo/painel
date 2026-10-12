@@ -76,6 +76,21 @@ export function consolidar(lancs, ativo) {
   };
 }
 
+// Entradas na Trezor que nenhum saque do extrato explica e que ainda não viraram lançamento.
+// Cada saque "casa" com uma entrada: chega o valor cheio (taxa cobrada por fora) ou um pouco menos (taxa descontada, até 2%).
+export function entradasNaoExplicadas(entradas, lancs, ativo) {
+  const jaRegistradas = new Set(lancs.map((l) => l.id));
+  const livres = [...entradas].sort((a, b) => a.ts - b.ts);
+  const saques = lancs.filter((l) => l.ativo === ativo && l.tipo === 'saque').sort((a, b) => (a.data < b.data ? -1 : 1));
+  for (const s of saques) {
+    const minimo = (s.qtd - (s.taxaQtd || 0)) * 0.98 - 1e-12;
+    const maximo = s.qtd * (1 + 1e-9) + 1e-12;
+    const i = livres.findIndex((e) => e.qtd >= minimo && e.qtd <= maximo);
+    if (i > -1) livres.splice(i, 1);
+  }
+  return livres.filter((e) => !jaRegistradas.has('t:' + e.txid));
+}
+
 // Valor de hoje x o que foi pago. O resultado considera só o grupo com custo conhecido.
 export function resultado(c, precoAtual) {
   if (!Number.isFinite(precoAtual)) return { valor: NaN, valorSemCusto: NaN, lucro: NaN, pct: NaN };
