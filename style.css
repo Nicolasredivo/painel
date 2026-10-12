@@ -72,10 +72,11 @@ button.perigo, button.link.perigo { color: var(--bad); }
 .secao-topo { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 .botoes { display: flex; gap: 8px; flex-wrap: wrap; }
 .lancs { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
-.lancs li { display: grid; grid-template-columns: 6.5rem 1fr auto auto 42px; gap: 8px; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--bd); font-size: .9rem; font-variant-numeric: tabular-nums; }
+.lancs li { display: grid; grid-template-columns: 6.5rem 1fr auto auto 38px 38px; gap: 8px; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--bd); font-size: .9rem; font-variant-numeric: tabular-nums; }
 .lancs li:last-child { border-bottom: 0; }
 .lancs .dir { text-align: right; }
-@media (max-width: 520px) { .lancs li { grid-template-columns: 5rem 1fr auto 38px; } .lancs li span:nth-child(4) { display: none; } }
+@media (max-width: 520px) { .lancs li { grid-template-columns: 5rem 1fr auto 34px 34px; } .lancs li span:nth-child(4) { display: none; } }
+.nota { font-size: .85rem; }
 
 .faixa { background: var(--card2); border: 1px solid var(--bd); border-radius: 10px; padding: 8px 12px; font-size: .9rem; }
 .pe { text-align: center; color: var(--mut); font-size: .8rem; }

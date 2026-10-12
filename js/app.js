@@ -1,12 +1,12 @@
 import { h, fmtBRL, fmtPct, fmtQtd, fmtDataHora, fmtHora, sinal, seta, MASK } from './util.js';
 import * as cofre from './vault.js';
 import { consolidar, resultado } from './calc.js';
-import { parseCSV, parseNumero, detectarColunas, converter, CAMPOS } from './csv.js';
+import { parseCSV, parseNumero, detectarColunas, converter, separarTabelas, converterTabelas, CAMPOS } from './csv.js';
 import { buscarPrecos, consultarSaldo, validarBtc, validarEth } from './net.js';
 
 const ATIVOS = ['BTC', 'ETH'];
 const NOMES = { BTC: 'Bitcoin', ETH: 'Ethereum' };
-const TIPOS = { compra: 'Compra', venda: 'Venda', saque: 'Saque p/ Trezor', taxa: 'Taxa de rede' };
+const TIPOS = { compra: 'Compra', venda: 'Venda', deposito: 'Depósito', saque: 'Saque', taxa: 'Taxa de rede' };
 const MIN = 60_000;
 const CHAVE_PRECOS = 'painel.precos';
 
@@ -185,6 +185,9 @@ function cartaoAtivo(a, d, R, Q) {
         linha('Valor hoje', R(r.valor)),
         linha('Resultado', h('span', {}, seta(r.lucro) + R(r.lucro) + ' (' + fmtPct(r.pct) + ')'), sinal(r.lucro)),
         c.realizado ? linha('Lucro de vendas', R(c.realizado), sinal(c.realizado)) : null),
+    c.qtdSemCusto > 0
+      ? h('p', { class: 'mut nota' }, `${Q(c.qtdSemCusto, a)} chegaram por depósito sem custo informado: contam no total, mas ficam fora do preço médio e do resultado. Informe o custo no lançamento (✎) para incluir.`)
+      : null,
     c.avisos.length ? h('ul', { class: 'avisos' }, c.avisos.slice(0, 3).map((t) => h('li', {}, t))) : null);
 }
 
@@ -205,7 +208,7 @@ function secaoTrezor(dados, R) {
       const enviado = dados[a].c.enviado;
       const dif = s.saldo - enviado;
       if (enviado > 0 && Math.abs(dif) > 1e-8) linhas.push(h('div', { class: 'mut' },
-        `Enviado pelo extrato: ${estado.cfg.esconder ? MASK : fmtQtd(enviado)}. Diferença: ${estado.cfg.esconder ? MASK : fmtQtd(dif)} (taxas de rede explicam diferenças pequenas).`));
+        `Saques no extrato somam ${estado.cfg.esconder ? MASK : fmtQtd(enviado)}; na Trezor há ${estado.cfg.esconder ? MASK : fmtQtd(s.saldo)}. A diferença pode ser saque para outro destino, taxa de rede ou saque ainda não feito.`));
       linhas.push(h('small', { class: 'mut' }, 'conferido às ' + fmtHora(s.ts)));
     }
     if (e) linhas.push(h('div', { class: 'aviso-linha' }, `Sem resposta do servidor da Trezor agora (${e}). Tentando de novo.`));
@@ -235,7 +238,10 @@ function secaoLancs() {
         h('span', { class: 'mut' }, fmtDataHora(l.data)),
         h('span', {}, `${TIPOS[l.tipo] || l.tipo} ${l.ativo}`),
         h('span', { class: 'dir' }, estado.cfg.esconder ? MASK : fmtQtd(l.qtd)),
-        h('span', { class: 'dir' }, l.tipo === 'compra' || l.tipo === 'venda' ? R(l.valor) : ''),
+        h('span', { class: 'dir' }, l.tipo === 'compra' || l.tipo === 'venda' ? R(l.valor) : l.tipo === 'deposito' ? (l.semCusto ? 'sem custo' : R(l.valor)) : ''),
+        l.tipo === 'deposito'
+          ? h('button', { class: 'icone', type: 'button', 'aria-label': 'Informar custo do depósito', title: 'Informar custo', onclick: () => abrirCusto(l) }, '✎')
+          : h('span', {}),
         h('button', {
           class: 'icone', type: 'button', 'aria-label': 'Apagar lançamento', title: 'Apagar',
           onclick: async () => {
@@ -402,14 +408,16 @@ function abrirManual() {
   const taxaBRL = h('input', { type: 'text', inputmode: 'decimal', placeholder: '0,00', autocomplete: 'off' });
   const taxaQtd = h('input', { type: 'text', inputmode: 'decimal', placeholder: '0,00000000', autocomplete: 'off' });
   const msg = h('p', { class: 'erro', role: 'alert' });
-  const gValor = campo('Valor total pago/recebido (R$)', valor);
+  const rotValor = h('span', {}, 'Valor total pago/recebido (R$)');
+  const gValor = h('label', { class: 'campo' }, rotValor, valor);
   const gTaxaBRL = campo('Taxa (R$), se houver', taxaBRL);
   const gTaxaQtd = campo('Taxa de rede (na própria moeda), se houver', taxaQtd);
   const rotQtd = h('span', {}, 'Quantidade');
   const ajustar = () => {
     const t = tipo.value;
-    gValor.hidden = !(t === 'compra' || t === 'venda');
-    gTaxaBRL.hidden = gValor.hidden;
+    gValor.hidden = !(t === 'compra' || t === 'venda' || t === 'deposito');
+    gTaxaBRL.hidden = !(t === 'compra' || t === 'venda');
+    rotValor.textContent = t === 'deposito' ? 'Custo desse depósito (R$) — deixe vazio se não souber' : 'Valor total pago/recebido (R$)';
     gTaxaQtd.hidden = t !== 'saque';
     rotQtd.textContent = t === 'saque' ? 'Quantidade enviada' : t === 'taxa' ? 'Quantidade gasta em taxa' : 'Quantidade';
   };
@@ -422,14 +430,16 @@ function abrirManual() {
       const v = parseNumero(valor.value);
       if (!(q > 0)) { msg.textContent = 'Informe a quantidade.'; return; }
       if ((t === 'compra' || t === 'venda') && !(v >= 0)) { msg.textContent = 'Informe o valor total em R$.'; return; }
-      estado.lancs.push({
+      const lanc = {
         id: 'm:' + crypto.randomUUID(), tipo: t, ativo: ativo.value,
         data: new Date(data.value).toISOString(), qtd: q,
-        valor: t === 'compra' || t === 'venda' ? v : 0,
+        valor: t === 'compra' || t === 'venda' ? v : t === 'deposito' && v > 0 ? v : 0,
         taxaBRL: t === 'compra' || t === 'venda' ? parseNumero(taxaBRL.value) || 0 : 0,
         taxaQtd: t === 'saque' ? parseNumero(taxaQtd.value) || 0 : 0,
         origem: 'manual',
-      });
+      };
+      if (t === 'deposito') lanc.semCusto = !(v > 0);
+      estado.lancs.push(lanc);
       await persistir(); render(); d.close();
     },
   },
@@ -440,24 +450,24 @@ function abrirManual() {
 
 // ---------- importar extrato ----------
 function abrirImportar() {
-  let linhas = null, mapa = null, taxaModo = 'brl', convertido = null;
+  let linhas = null, mapa = null, taxaModo = 'brl', convertido = null, tabelas = [];
   const area = h('div', {});
   const arq = h('input', { type: 'file', accept: '.csv,.txt,.xlsx,.xls,text/csv' });
 
   const atualizarPrevia = () => {
-    convertido = converter(linhas.slice(1), mapa, { taxaModo });
+    convertido = tabelas.length ? converterTabelas(tabelas, { taxaModo }) : converter(linhas.slice(1), mapa, { taxaModo });
     const existentes = new Set(estado.lancs.map((l) => l.id));
     const novos = convertido.itens.filter((i) => !existentes.has(i.id));
     const ign = convertido.ignoradas;
     const cont = (f) => convertido.itens.filter(f).length;
     previa.replaceChildren(
       h('p', {}, h('strong', {}, `${convertido.itens.length} lançamentos reconhecidos`),
-        ` (${cont((i) => i.tipo === 'compra')} compras, ${cont((i) => i.tipo === 'venda')} vendas, ${cont((i) => i.tipo === 'saque')} saques) — `,
+        ` (${cont((i) => i.tipo === 'compra')} compras, ${cont((i) => i.tipo === 'venda')} vendas, ${cont((i) => i.tipo === 'deposito')} depósitos de cripto, ${cont((i) => i.tipo === 'saque')} saques) — `,
         `${convertido.itens.length - novos.length} já existiam, ${novos.length} são novos.`),
-      h('p', { class: 'mut' }, `Ignorados: ${ign.deposito} depósitos, ${ign.ativo} de outras moedas, ${ign.tipo} de tipo desconhecido, ${ign.invalida} com dados incompletos.`),
+      h('p', { class: 'mut' }, `Ignorados: ${ign.deposito} depósitos em reais ou de outras moedas, ${ign.ativo} de outras moedas, ${ign.tipo} de tipo desconhecido, ${ign.invalida} com dados incompletos.`),
       h('ul', { class: 'lancs' }, convertido.itens.slice(0, 5).map((l) => h('li', {},
         h('span', { class: 'mut' }, fmtDataHora(l.data)), h('span', {}, `${TIPOS[l.tipo]} ${l.ativo}`),
-        h('span', { class: 'dir' }, fmtQtd(l.qtd)), h('span', { class: 'dir' }, l.tipo === 'saque' ? '' : fmtBRL(l.valor))))),
+        h('span', { class: 'dir' }, fmtQtd(l.qtd)), h('span', { class: 'dir' }, l.tipo === 'saque' ? '' : l.semCusto ? 'sem custo' : fmtBRL(l.valor))))),
       h('button', {
         type: 'button', class: 'primario', disabled: novos.length === 0,
         onclick: async () => {
@@ -495,14 +505,39 @@ function abrirImportar() {
     if (f.size > 5_000_000) { area.replaceChildren(h('p', { class: 'erro' }, 'Arquivo grande demais para um extrato.')); return; }
     linhas = parseCSV(await f.text());
     if (linhas.length < 2) { area.replaceChildren(h('p', { class: 'erro' }, 'Não encontrei linhas de dados nesse arquivo.')); return; }
-    mapa = detectarColunas(linhas[0]);
-    desenharMapa();
+    tabelas = separarTabelas(linhas);
+    if (tabelas.length) {
+      area.replaceChildren(
+        h('p', { class: 'mut' }, `${linhas.length} linhas lidas. Encontrei ${tabelas.length} seção(ões) de lançamentos e li as colunas automaticamente.`),
+        previa);
+      atualizarPrevia();
+    } else {
+      mapa = detectarColunas(linhas[0]);
+      desenharMapa();
+    }
   });
 
   const d = dialogo('Importar extrato (CSV)', [
     h('p', { class: 'mut' }, 'O arquivo é lido aqui no aparelho e não é enviado a lugar nenhum. Importar o mesmo arquivo de novo não duplica.'),
     campo('Arquivo do extrato', arq), area,
   ], true);
+}
+
+// ---------- custo de um depósito ----------
+function abrirCusto(l) {
+  const custo = h('input', { type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0,00', value: l.semCusto ? '' : String(l.valor).replace('.', ',') });
+  const d = dialogo('Custo do depósito', h('form', {
+    onsubmit: async (e) => {
+      e.preventDefault();
+      const v = parseNumero(custo.value);
+      l.valor = v > 0 ? v : 0;
+      l.semCusto = !(v > 0);
+      await persistir(); render(); d.close();
+    },
+  },
+  h('p', { class: 'mut' }, `${fmtDataHora(l.data)} · ${fmtQtd(l.qtd)} ${l.ativo}. Quanto você pagou por isso, no total? Se não souber, deixe vazio e ele fica fora do preço médio.`),
+  campo('Custo total (R$)', custo),
+  h('button', { type: 'submit', class: 'primario' }, 'Salvar')));
 }
 
 // ---------- configurações ----------

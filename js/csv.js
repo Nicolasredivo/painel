@@ -18,8 +18,10 @@ const norm = (s) =>
 // ---------- CSV ----------
 export function parseCSV(texto) {
   texto = String(texto).replace(/^﻿/, '');
-  const primeira = texto.split(/\r?\n/, 1)[0] || '';
-  const delim = [';', '\t', ','].map((d) => [d, primeira.split(d).length]).sort((a, b) => b[1] - a[1])[0][0];
+  // Separador = o mais frequente nas primeiras linhas (empate: ponto e vírgula, comum em extratos brasileiros).
+  const amostra = texto.split(/\r?\n/, 40);
+  const conta = (d) => amostra.reduce((s, l) => s + l.split(d).length - 1, 0);
+  const delim = [';', '\t', ','].map((d) => [d, conta(d)]).sort((a, b) => b[1] - a[1])[0][0];
   const linhas = [];
   let linha = [], cel = '', aspas = false;
   for (let i = 0; i < texto.length; i++) {
@@ -117,7 +119,7 @@ export function classificarTipo(s) {
   if (/compra|buy|bid|aquisic|purchase/.test(n)) return 'compra';
   if (/venda|sell|ask|sale/.test(n)) return 'venda';
   if (/saque|withdraw|retirada|envio|enviar|send|saida/.test(n)) return 'saque';
-  if (/deposit|receb|entrada/.test(n)) return 'deposito';
+  if (/deposit|receb|entrada|cashback|bonus/.test(n)) return 'deposito';
   return null;
 }
 
@@ -144,10 +146,10 @@ export function converter(linhas, mapa, { taxaModo = 'brl' } = {}) {
   for (const row of linhas) {
     const cel = (k) => (mapa[k] >= 0 ? row[mapa[k]] : '');
     const tipo = classificarTipo(cel('tipo'));
-    if (tipo === 'deposito') { ign.deposito++; continue; }
     if (!tipo) { ign.tipo++; continue; }
     const ativo = classificarAtivo(cel('ativo'));
-    if (!ativo) { ign.ativo++; continue; }
+    // Depósito em reais ou de outra moeda não entra; depósito de BTC/ETH entra (custo desconhecido).
+    if (!ativo) { ign[tipo === 'deposito' ? 'deposito' : 'ativo']++; continue; }
     const data = parseData(cel('data'));
     let qtd = Math.abs(parseNumero(cel('qtd')));
     const preco = Math.abs(parseNumero(cel('preco')));
@@ -155,9 +157,15 @@ export function converter(linhas, mapa, { taxaModo = 'brl' } = {}) {
     const taxa = taxaModo === 'ignorar' ? 0 : Math.abs(parseNumero(cel('taxa'))) || 0;
     if (!Number.isFinite(qtd) && Number.isFinite(total) && preco > 0) qtd = total / preco;
     if (!Number.isFinite(total) && Number.isFinite(qtd) && Number.isFinite(preco)) total = qtd * preco;
-    if (!data || !(qtd > 0) || (tipo !== 'saque' && !(total >= 0))) { ign.invalida++; continue; }
+    const semValor = tipo === 'saque' || tipo === 'deposito';
+    if (!data || !(qtd > 0) || (!semValor && !(total >= 0))) { ign.invalida++; continue; }
 
-    const item = { tipo, ativo, data, qtd, valor: tipo === 'saque' ? 0 : total, taxaBRL: 0, taxaQtd: 0, origem: 'csv' };
+    const item = {
+      tipo, ativo, data, qtd,
+      valor: tipo === 'saque' ? 0 : Number.isFinite(total) ? total : 0,
+      taxaBRL: 0, taxaQtd: 0, origem: 'csv',
+    };
+    if (tipo === 'deposito') item.semCusto = !(total > 0);
     if (taxaModo === 'brl' && tipo !== 'saque') item.taxaBRL = taxa;
     if (taxaModo === 'moeda') {
       if (tipo === 'saque') item.taxaQtd = taxa;
@@ -172,4 +180,37 @@ export function converter(linhas, mapa, { taxaModo = 'brl' } = {}) {
     itens.push(item);
   }
   return { itens, ignoradas: ign };
+}
+
+// ---------- extratos com várias seções (ex.: Bitypreço) ----------
+// Cada tabela começa numa linha cuja 1ª célula é "Data" e vai até a primeira linha que não começa com data.
+const COMECA_COM_DATA = /^(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d{4}-\d{2}-\d{2})/;
+
+export function separarTabelas(linhas) {
+  const tabelas = [];
+  let atual = null;
+  for (const l of linhas) {
+    if (['data', 'date', 'datahora', 'datetime'].includes(norm(l[0])) && l.length > 2) {
+      // Alguns cabeçalhos trazem duas colunas coladas por vírgula (ex.: "Preco R$,TxID").
+      const cab = l.flatMap((c) => (/txid/i.test(c) && c.includes(',') ? c.split(',') : [c])).map((c) => c.trim());
+      atual = { cabecalho: cab, linhas: [] };
+      tabelas.push(atual);
+      continue;
+    }
+    if (!atual) continue;
+    if (!COMECA_COM_DATA.test(l[0] || '')) { atual = null; continue; }
+    atual.linhas.push(l);
+  }
+  return tabelas.filter((t) => t.linhas.length > 0);
+}
+
+export function converterTabelas(tabelas, opcoes) {
+  const itens = [];
+  const ignoradas = { tipo: 0, ativo: 0, invalida: 0, deposito: 0 };
+  for (const t of tabelas) {
+    const r = converter(t.linhas, detectarColunas(t.cabecalho), opcoes);
+    itens.push(...r.itens);
+    for (const k of Object.keys(ignoradas)) ignoradas[k] += r.ignoradas[k];
+  }
+  return { itens, ignoradas };
 }

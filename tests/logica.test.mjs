@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { consolidar, resultado } from '../js/calc.js';
-import { parseCSV, parseNumero, parseData, detectarColunas, converter, classificarAtivo, classificarTipo } from '../js/csv.js';
+import { parseCSV, parseNumero, parseData, detectarColunas, converter, classificarAtivo, classificarTipo, separarTabelas, converterTabelas } from '../js/csv.js';
 import { validarBtc, validarEth } from '../js/net.js';
 import * as cofre from '../js/vault.js';
 
@@ -165,4 +165,86 @@ test('cofre: abre com a senha certa, falha com a errada, cada gravação usa IV 
   const adulterado = { ...envelope, ct: envelope.ct.slice(0, -4) + 'AAAA' };
   await assert.rejects(cofre.abrir('uma frase longa de teste', adulterado));
   await assert.rejects(cofre.abrir('x', { v: 2 }), /arquivo-invalido/);
+});
+
+// Formato com várias seções, como o extrato real da Bitypreço (valores inventados).
+const MULTI = [
+  'Empresa Exemplo LTDA  CNPJ 00.000.000/000100',
+  ';;;;;;',
+  'Saldos no final do dia 12/10/2026',
+  ';;;;;;',
+  'BTC;;;0,02',
+  'ETH;;;0,5',
+  'BRL;;;20,90',
+  ';;;;;;',
+  'Depositos, Saques e Cashback',
+  'Data;Tipo;Moeda;Quantidade;Preco R$,TxID',
+  '25/11/2023 00:06:55;Deposito;BTC;0,001;;aaaa1111',
+  '08/12/2023 08:57:29;Deposito;BRL;65,00;;',
+  '14/12/2025 21:24:34;Saque;BTC;0,0005;;bbbb2222',
+  ';;;;;;',
+  ';;;;;;',
+  'Compras e Vendas',
+  'Data;Tipo;Moeda;Quantidade;Preco (R$);Total (R$)',
+  '28/09/2026 10:13:30;Venda;DOGE;45,4;0,47;21,17',
+  '13/11/2025 10:53:50;Compra;BTC;0,0002;500.000,00;100,00',
+  '04/03/2024 16:02:09;Compra;ETH;0,01;18.000,00;180,00',
+  ';;;;;;',
+  'BTC total comprados:;;;0,0002',
+].join('\n');
+
+test('extrato com várias seções: acha as tabelas, o TxID e os depósitos de cripto', () => {
+  const tabelas = separarTabelas(parseCSV(MULTI));
+  assert.equal(tabelas.length, 2);
+  assert.deepEqual(tabelas[0].cabecalho, ['Data', 'Tipo', 'Moeda', 'Quantidade', 'Preco R$', 'TxID']);
+  const { itens, ignoradas } = converterTabelas(tabelas);
+  assert.equal(itens.length, 4);
+  assert.equal(ignoradas.deposito, 1);   // depósito em reais
+  assert.equal(ignoradas.ativo, 1);      // venda de DOGE
+  const dep = itens.find((i) => i.tipo === 'deposito');
+  assert.equal(dep.ativo, 'BTC');
+  assert.equal(dep.semCusto, true);
+  assert.equal(dep.id, 'i:aaaa1111:deposito');
+  assert.equal(itens.find((i) => i.tipo === 'saque').qtd, 0.0005);
+  assert.equal(itens.find((i) => i.tipo === 'compra' && i.ativo === 'ETH').valor, 180);
+  // reimportar não muda os ids
+  assert.deepEqual(converterTabelas(separarTabelas(parseCSV(MULTI))).itens.map((i) => i.id), itens.map((i) => i.id));
+});
+
+test('arquivo simples (uma tabela, cabeçalho Data) também cai no modo de seções', () => {
+  const t = separarTabelas(parseCSV(CSV));
+  assert.equal(t.length, 1);
+  assert.equal(converterTabelas(t).itens.length, 3);
+});
+
+test('depósito sem custo conta na quantidade mas fica fora do preço médio e do resultado', () => {
+  const c = consolidar([
+    L({ tipo: 'deposito', ativo: 'BTC', data: '2023-11-25T00:00:00Z', qtd: 0.001, semCusto: true }),
+    L({ tipo: 'compra', ativo: 'BTC', data: '2024-01-01T00:00:00Z', qtd: 0.001, valor: 400 }),
+  ], 'BTC');
+  assert.equal(c.qtd, 0.002);
+  assert.equal(c.qtdSemCusto, 0.001);
+  assert.equal(c.precoMedio, 400000);
+  const r = resultado(c, 500000);
+  assert.equal(r.valor, 1000);
+  assert.equal(r.valorSemCusto, 500);
+  assert.equal(r.lucro, 100);          // só a parte com custo: 0,001 x 500.000 - 400
+  assert.equal(r.pct, 25);
+});
+
+test('depósito com custo informado entra no preço médio; venda baixa os dois grupos na proporção', () => {
+  const com = consolidar([
+    L({ tipo: 'deposito', ativo: 'ETH', data: '2023-01-01T00:00:00Z', qtd: 1, valor: 100 }),
+    L({ tipo: 'compra', ativo: 'ETH', data: '2023-02-01T00:00:00Z', qtd: 1, valor: 300 }),
+  ], 'ETH');
+  assert.equal(com.precoMedio, 200);
+  const mista = consolidar([
+    L({ tipo: 'deposito', ativo: 'ETH', data: '2023-01-01T00:00:00Z', qtd: 1, semCusto: true }),
+    L({ tipo: 'compra', ativo: 'ETH', data: '2023-02-01T00:00:00Z', qtd: 1, valor: 300 }),
+    L({ tipo: 'venda', ativo: 'ETH', data: '2023-03-01T00:00:00Z', qtd: 1, valor: 400 }),
+  ], 'ETH');
+  assert.equal(mista.qtd, 1);
+  assert.equal(mista.qtdSemCusto, 0.5);
+  assert.equal(mista.custo, 150);
+  assert.equal(mista.realizado, 50);     // metade da venda (200) menos o custo de 0,5 ETH (150)
 });
