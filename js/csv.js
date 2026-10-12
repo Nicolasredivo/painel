@@ -214,3 +214,52 @@ export function converterTabelas(tabelas, opcoes) {
   }
   return { itens, ignoradas };
 }
+
+// ---------- conferência com o saldo da corretora ----------
+// Alguns extratos trazem o saldo de cada moeda no topo (ex.: "BTC;;;0,0128"). Se o que o extrato explica
+// (compras + depósitos − vendas − saques) for maior que esse saldo, a diferença quase sempre é taxa de rede
+// de saque, que a corretora cobra por fora e não lista.
+export function lerSaldos(linhas) {
+  const saldos = {};
+  for (const l of linhas) {
+    if (['data', 'date', 'datahora', 'datetime'].includes(norm(l[0])) && l.length > 2) break; // chegou nas tabelas
+    if (l.length >= 4 && /^[A-Z0-9]{2,10}$/.test(l[0] || '') && !(l[1] || '') && !(l[2] || '')) {
+      const n = parseNumero(l[3]);
+      if (Number.isFinite(n)) saldos[l[0]] = n;
+    }
+  }
+  return saldos;
+}
+
+const arred8 = (n) => Math.round(n * 1e8) / 1e8;
+const fmt8 = (n) => n.toLocaleString('pt-BR', { maximumFractionDigits: 8 });
+
+// Devolve { taxas, avisos }. Cada taxa é um lançamento pronto (id fixo por moeda, para reimportar atualizar em vez de duplicar).
+export function conciliarSaldos(itens, saldos, { tolerancia = 0.02 } = {}) {
+  const taxas = [];
+  const avisos = [];
+  for (const ativo of ['BTC', 'ETH']) {
+    const saldo = saldos[ativo];
+    const L = itens.filter((i) => i.ativo === ativo);
+    if (!Number.isFinite(saldo) || L.length === 0) continue;
+    const soma = (f) => L.filter(f).reduce((s, i) => s + i.qtd, 0);
+    const esperado =
+      soma((i) => i.tipo === 'compra') + soma((i) => i.tipo === 'deposito') -
+      soma((i) => i.tipo === 'venda') - soma((i) => i.tipo === 'saque') - soma((i) => i.tipo === 'taxa') -
+      L.reduce((s, i) => s + (i.taxaQtd || 0), 0);
+    const dif = arred8(esperado - saldo);
+    if (Math.abs(dif) < 1e-8) continue;
+    if (dif < 0) {
+      avisos.push(`${ativo}: o saldo da corretora no arquivo (${fmt8(saldo)}) é maior que o calculado pelo extrato (${fmt8(arred8(esperado))}). Pode faltar um depósito ou uma compra no histórico.`);
+    } else if (dif > Math.max(soma((i) => i.tipo === 'compra') + soma((i) => i.tipo === 'deposito'), 1e-8) * tolerancia) {
+      // Tolerância sobre o total que entrou, e não sobre o saldo que sobrou: depois de sacar quase tudo,
+      // o saldo restante é minúsculo e qualquer taxa pareceria "grande".
+      avisos.push(`${ativo}: o extrato explica ${fmt8(dif)} a mais do que o saldo da corretora, uma diferença grande para ser só taxa. Confira o histórico; não registrei nada.`);
+    } else {
+      const ultimo = [...L].filter((i) => i.tipo === 'saque').sort((a, b) => (a.data < b.data ? -1 : 1)).pop()
+        || [...L].sort((a, b) => (a.data < b.data ? -1 : 1)).pop();
+      taxas.push({ id: 'c:' + ativo, tipo: 'taxa', ativo, data: ultimo.data, qtd: dif, valor: 0, taxaBRL: 0, taxaQtd: 0, origem: 'conciliacao' });
+    }
+  }
+  return { taxas, avisos };
+}

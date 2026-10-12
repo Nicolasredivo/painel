@@ -1,7 +1,7 @@
 import { h, fmtBRL, fmtPct, fmtQtd, fmtDataHora, fmtHora, sinal, seta, MASK } from './util.js';
 import * as cofre from './vault.js';
 import { consolidar, resultado } from './calc.js';
-import { parseCSV, parseNumero, detectarColunas, converter, separarTabelas, converterTabelas, CAMPOS } from './csv.js';
+import { parseCSV, parseNumero, detectarColunas, converter, separarTabelas, converterTabelas, lerSaldos, conciliarSaldos, CAMPOS } from './csv.js';
 import { buscarPrecos, consultarSaldo, validarBtc, validarEth } from './net.js';
 
 const ATIVOS = ['BTC', 'ETH'];
@@ -450,14 +450,20 @@ function abrirManual() {
 
 // ---------- importar extrato ----------
 function abrirImportar() {
-  let linhas = null, mapa = null, taxaModo = 'brl', convertido = null, tabelas = [];
+  let linhas = null, mapa = null, taxaModo = 'brl', convertido = null, tabelas = [], desmarcadas = new Set();
   const area = h('div', {});
   const arq = h('input', { type: 'file', accept: '.csv,.txt,.xlsx,.xls,text/csv' });
 
   const atualizarPrevia = () => {
     convertido = tabelas.length ? converterTabelas(tabelas, { taxaModo }) : converter(linhas.slice(1), mapa, { taxaModo });
-    const existentes = new Set(estado.lancs.map((l) => l.id));
-    const novos = convertido.itens.filter((i) => !existentes.has(i.id));
+    const porId = new Map(estado.lancs.map((l) => [l.id, l]));
+    const novos = convertido.itens.filter((i) => !porId.has(i.id));
+    // Conferência com o saldo que a corretora informa no topo do arquivo: a diferença costuma ser taxa de rede.
+    const concil = tabelas.length ? conciliarSaldos(convertido.itens, lerSaldos(linhas)) : { taxas: [], avisos: [] };
+    const muda = (t) => !porId.has(t.id) || Math.abs(porId.get(t.id).qtd - t.qtd) > 1e-9;
+    const taxasEscolhidas = concil.taxas.filter((t) => muda(t) && !desmarcadas.has(t.id));
+    const total = novos.length + taxasEscolhidas.length;
+    const descreve = (n, t) => [n ? `${n} lançamento${n > 1 ? 's' : ''}` : '', t ? `${t} taxa${t > 1 ? 's' : ''} de rede` : ''].filter(Boolean).join(' + ');
     const ign = convertido.ignoradas;
     const cont = (f) => convertido.itens.filter(f).length;
     previa.replaceChildren(
@@ -465,17 +471,33 @@ function abrirImportar() {
         ` (${cont((i) => i.tipo === 'compra')} compras, ${cont((i) => i.tipo === 'venda')} vendas, ${cont((i) => i.tipo === 'deposito')} depósitos de cripto, ${cont((i) => i.tipo === 'saque')} saques) — `,
         `${convertido.itens.length - novos.length} já existiam, ${novos.length} são novos.`),
       h('p', { class: 'mut' }, `Ignorados: ${ign.deposito} depósitos em reais ou de outras moedas, ${ign.ativo} de outras moedas, ${ign.tipo} de tipo desconhecido, ${ign.invalida} com dados incompletos.`),
+      concil.taxas.length || concil.avisos.length
+        ? h('div', { class: 'concil' },
+          h('strong', {}, 'Conferência com o saldo da corretora'),
+          concil.taxas.map((t) => h('label', { class: 'check' },
+            h('input', {
+              type: 'checkbox', checked: !desmarcadas.has(t.id),
+              onchange: (e) => { if (e.target.checked) desmarcadas.delete(t.id); else desmarcadas.add(t.id); atualizarPrevia(); },
+            }),
+            ` ${fmtQtd(t.qtd)} ${t.ativo} a menos do que o extrato explica (provável taxa de rede de saque). Registrar como taxa de rede${porId.has(t.id) ? (muda(t) ? ' — atualiza o valor já registrado' : ' — já registrada') : ''}.`)),
+          concil.avisos.map((a) => h('p', { class: 'mut' }, a)))
+        : null,
       h('ul', { class: 'lancs' }, convertido.itens.slice(0, 5).map((l) => h('li', {},
         h('span', { class: 'mut' }, fmtDataHora(l.data)), h('span', {}, `${TIPOS[l.tipo]} ${l.ativo}`),
         h('span', { class: 'dir' }, fmtQtd(l.qtd)), h('span', { class: 'dir' }, l.tipo === 'saque' ? '' : l.semCusto ? 'sem custo' : fmtBRL(l.valor))))),
       h('button', {
-        type: 'button', class: 'primario', disabled: novos.length === 0,
+        type: 'button', class: 'primario', disabled: total === 0,
         onclick: async () => {
           estado.lancs.push(...novos);
+          for (const t of taxasEscolhidas) {
+            const existente = porId.get(t.id);
+            if (existente) Object.assign(existente, { qtd: t.qtd, data: t.data });
+            else estado.lancs.push({ ...t });
+          }
           await persistir(); render(); d.close();
-          aviso(`${novos.length} lançamentos importados. Faça um backup em ⚙.`);
+          aviso(`Importado: ${descreve(novos.length, taxasEscolhidas.length)}. Faça um backup em ⚙.`);
         },
-      }, novos.length ? `Importar ${novos.length} lançamentos` : 'Nada novo para importar'));
+      }, total ? `Importar ${descreve(novos.length, taxasEscolhidas.length)}` : 'Nada novo para importar'));
   };
   const previa = h('div', { class: 'previa' });
 

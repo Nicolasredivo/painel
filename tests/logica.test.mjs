@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { consolidar, resultado } from '../js/calc.js';
-import { parseCSV, parseNumero, parseData, detectarColunas, converter, classificarAtivo, classificarTipo, separarTabelas, converterTabelas } from '../js/csv.js';
+import { parseCSV, parseNumero, parseData, detectarColunas, converter, classificarAtivo, classificarTipo, separarTabelas, converterTabelas, lerSaldos, conciliarSaldos } from '../js/csv.js';
 import { validarBtc, validarEth } from '../js/net.js';
 import * as cofre from '../js/vault.js';
 
@@ -247,4 +247,68 @@ test('depósito com custo informado entra no preço médio; venda baixa os dois 
   assert.equal(mista.qtdSemCusto, 0.5);
   assert.equal(mista.custo, 150);
   assert.equal(mista.realizado, 50);     // metade da venda (200) menos o custo de 0,5 ETH (150)
+});
+
+// ---------- conferência de saldos ----------
+const comSaldo = (btc, eth) => MULTI.replace('BTC;;;0,02', 'BTC;;;' + btc).replace('ETH;;;0,5', 'ETH;;;' + eth);
+
+test('lê os saldos do topo do extrato e ignora o resto', () => {
+  const s = lerSaldos(parseCSV(MULTI));
+  assert.equal(s.BTC, 0.02);
+  assert.equal(s.ETH, 0.5);
+  assert.equal(s.BRL, 20.9);
+  assert.equal(s['CNPJ'], undefined);
+});
+
+test('diferença pequena vira taxa de rede do saque, com id fixo por moeda', () => {
+  // BTC esperado: 0,0002 + 0,001 - 0,0005 = 0,0007 ; saldo 0,00068 -> taxa de 0,00002
+  const linhas = parseCSV(comSaldo('0,00068', '0,01'));
+  const { itens } = converterTabelas(separarTabelas(linhas));
+  const { taxas, avisos } = conciliarSaldos(itens, lerSaldos(linhas));
+  assert.equal(avisos.length, 0);
+  assert.equal(taxas.length, 1);
+  assert.equal(taxas[0].ativo, 'BTC');
+  assert.equal(taxas[0].tipo, 'taxa');
+  assert.equal(taxas[0].qtd, 0.00002);
+  assert.equal(taxas[0].id, 'c:BTC');
+  assert.equal(taxas[0].data, itens.find((i) => i.tipo === 'saque').data);   // data do último saque
+  // a taxa entra no cálculo: some da quantidade, o custo fica, o preço médio sobe um pouco
+  const antes = consolidar(itens, 'BTC');
+  const depois = consolidar([...itens, taxas[0]], 'BTC');
+  assert.ok(Math.abs(antes.qtd - depois.qtd - 0.00002) < 1e-12);
+  assert.equal(antes.custo, depois.custo);
+  assert.ok(depois.precoMedio > antes.precoMedio);
+});
+
+test('saldo que bate (ETH) não gera nada', () => {
+  const linhas = parseCSV(comSaldo('0,00068', '0,01'));
+  const { itens } = converterTabelas(separarTabelas(linhas));
+  assert.equal(conciliarSaldos(itens, lerSaldos(linhas)).taxas.filter((t) => t.ativo === 'ETH').length, 0);
+});
+
+test('saldo da corretora maior que o extrato: só avisa', () => {
+  const linhas = parseCSV(comSaldo('0,02', '0,01'));      // 0,02 > 0,0007 esperado
+  const { itens } = converterTabelas(separarTabelas(linhas));
+  const { taxas, avisos } = conciliarSaldos(itens, lerSaldos(linhas));
+  assert.equal(taxas.length, 0);
+  assert.match(avisos[0], /maior que o calculado/);
+});
+
+test('diferença grande demais não vira taxa: só avisa', () => {
+  const linhas = parseCSV(comSaldo('0,0003', '0,01'));    // esperado 0,0007, saldo 0,0003: 57% de diferença
+  const { itens } = converterTabelas(separarTabelas(linhas));
+  const { taxas, avisos } = conciliarSaldos(itens, lerSaldos(linhas));
+  assert.equal(taxas.length, 0);
+  assert.match(avisos[0], /diferença grande/);
+});
+
+test('depois de sacar quase tudo, a taxa ainda é reconhecida (tolerância sobre o que entrou, não sobre o que sobrou)', () => {
+  const itens = [
+    { tipo: 'compra', ativo: 'ETH', data: '2025-01-01T00:00:00.000Z', qtd: 0.05, valor: 900, taxaBRL: 0, taxaQtd: 0 },
+    { tipo: 'saque', ativo: 'ETH', data: '2025-02-01T00:00:00.000Z', qtd: 0.0495, valor: 0, taxaBRL: 0, taxaQtd: 0 },
+  ];
+  // sobraram 0,0005 no extrato; a corretora mostra saldo 0 -> 0,0005 foi taxa (1% do que entrou)
+  const { taxas, avisos } = conciliarSaldos(itens, { ETH: 0 });
+  assert.equal(avisos.length, 0);
+  assert.equal(taxas[0].qtd, 0.0005);
 });

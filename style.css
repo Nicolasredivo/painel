@@ -103,3 +103,4 @@ details summary { cursor: pointer; color: var(--acc); margin-bottom: 8px; }
 details[open] { display: grid; gap: 8px; }
 
 .aviso { position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%); background: var(--card2); border: 1px solid var(--acc); border-radius: 10px; padding: 10px 16px; z-index: 10; max-width: calc(100% - 32px); }
+.concil { border: 1px solid var(--bd); border-radius: 10px; padding: 8px 12px; display: grid; gap: 6px; font-size: .9rem; }
