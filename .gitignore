@@ -1,0 +1,10 @@
+# Rede de segurança: nada de dado pessoal entra no repositório.
+*.csv
+*.xlsx
+*.xls
+*.ofx
+*.pdf
+painel-backup*.json
+.env
+.env.*
+node_modules/
