@@ -251,7 +251,8 @@ export function conciliarSaldos(itens, saldos, { tolerancia = 0.02 } = {}) {
     if (Math.abs(dif) < 1e-8) continue;
     if (dif < 0) {
       avisos.push(`${ativo}: o saldo da corretora no arquivo (${fmt8(saldo)}) é maior que o calculado pelo extrato (${fmt8(arred8(esperado))}). Pode faltar um depósito ou uma compra no histórico.`);
-    } else if (dif > Math.max(soma((i) => i.tipo === 'compra') + soma((i) => i.tipo === 'deposito'), 1e-8) * tolerancia) {
+    } else if (dif > Math.max(Math.max(soma((i) => i.tipo === 'compra') + soma((i) => i.tipo === 'deposito'), 1e-8) * tolerancia, soma((i) => i.tipo === 'saque') * 0.15)) {
+      // Aceita até 2% do que entrou OU até 15% do que foi sacado: a taxa de saque é fixa e pesa mais em valores pequenos.
       // Tolerância sobre o total que entrou, e não sobre o saldo que sobrou: depois de sacar quase tudo,
       // o saldo restante é minúsculo e qualquer taxa pareceria "grande".
       avisos.push(`${ativo}: o extrato explica ${fmt8(dif)} a mais do que o saldo da corretora, uma diferença grande para ser só taxa. Confira o histórico; não registrei nada.`);

@@ -395,3 +395,17 @@ test('entrada ignorada não volta a aparecer', () => {
   assert.equal(entradasNaoExplicadas([e], [], 'ETH').length, 1);
   assert.equal(entradasNaoExplicadas([e], [], 'ETH', ['tX']).length, 0);
 });
+
+test('taxa de saque fixa e alta (≈11% do sacado) é aceita como taxa; diferença maior que isso só avisa', () => {
+  const base = [
+    { tipo: 'compra', ativo: 'ETH', data: '2024-01-01T00:00:00.000Z', qtd: 0.0504, valor: 800, taxaBRL: 0, taxaQtd: 0 },
+    { tipo: 'saque', ativo: 'ETH', data: '2026-10-13T21:17:00.000Z', qtd: 0.0455, valor: 0, taxaBRL: 0, taxaQtd: 0 },
+  ];
+  const ok = conciliarSaldos(base, { ETH: 0 });            // sobraram 0,0049 (10,8% do sacado) e a conta zerou
+  assert.equal(ok.avisos.length, 0);
+  assert.equal(ok.taxas[0].qtd, 0.0049);
+  const sobra = [{ ...base[0], qtd: 0.07 }, base[1]];       // sobrariam 0,0245 (54% do sacado): não é taxa
+  const ruim = conciliarSaldos(sobra, { ETH: 0 });
+  assert.equal(ruim.taxas.length, 0);
+  assert.match(ruim.avisos[0], /diferença grande/);
+});
