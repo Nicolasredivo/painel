@@ -182,8 +182,12 @@ function cartaoAtivo(a, d, R, Q) {
         linha('Quantidade', Q(c.qtd, a)),
         linha('Preço médio', R(c.precoMedio)),
         linha('Investido', R(c.custo)),
-        linha('Valor hoje', R(r.valor)),
+        c.qtdSemCusto > 0
+          ? linha('Valor hoje (com custo)', R(r.valor - r.valorSemCusto))
+          : linha('Valor hoje', R(r.valor)),
         linha('Resultado', h('span', {}, seta(r.lucro) + R(r.lucro) + ' (' + fmtPct(r.pct) + ')'), sinal(r.lucro)),
+        c.qtdSemCusto > 0 ? linha('Sem custo informado', R(r.valorSemCusto)) : null,
+        c.qtdSemCusto > 0 ? linha('Total hoje', R(r.valor)) : null,
         c.realizado ? linha('Lucro de vendas', R(c.realizado), sinal(c.realizado)) : null),
     c.qtdSemCusto > 0
       ? h('p', { class: 'mut nota' }, `${Q(c.qtdSemCusto, a)} chegaram por depósito sem custo informado: contam no total, mas ficam fora do preço médio e do resultado. Informe o custo no lançamento (✎) para incluir.`)
@@ -279,8 +283,9 @@ function painel() {
   const custo = ATIVOS.reduce((s, a) => s + dados[a].c.custo, 0);
   const temPreco = ATIVOS.every((a) => Number.isFinite(dados[a].p));
   const valor = temPreco ? ATIVOS.reduce((s, a) => s + dados[a].r.valor, 0) : NaN;
-  const lucro = valor - custo;
+  const lucro = temPreco ? ATIVOS.reduce((x, a) => x + dados[a].r.lucro, 0) : NaN;   // só o que tem custo conhecido
   const pct = custo > 0 ? (lucro / custo) * 100 : NaN;
+  const semCustoTotal = temPreco ? ATIVOS.reduce((x, a) => x + dados[a].r.valorSemCusto, 0) : 0;
 
   const dias = estado.cfg.ultimoBackup ? (Date.now() - new Date(estado.cfg.ultimoBackup)) / 864e5 : Infinity;
   const stale = precos && Date.now() - precos.ts > 3 * MIN;
@@ -301,7 +306,7 @@ function painel() {
       h('div', { class: 'mut' }, 'Total (BTC + ETH)'),
       h('div', { class: 'total-valor' }, R(valor)),
       h('div', { class: 'total-res ' + sinal(lucro) },
-        custo > 0 ? `${seta(lucro)}${R(lucro)} (${fmtPct(pct)}) sobre ${R(custo)} investidos` : 'Lance suas compras para ver o resultado'),
+        custo > 0 ? `${seta(lucro)}${R(lucro)} (${fmtPct(pct)}) sobre ${R(custo)} investidos${semCustoTotal > 0 ? ` (não inclui ${R(semCustoTotal)} sem custo informado)` : ''}` : 'Lance suas compras para ver o resultado'),
       h('div', { class: 'status' },
         h('span', { class: 'ponto ' + (precosErro || stale ? 'ruim' : precos ? 'bom' : '') }),
         precos
