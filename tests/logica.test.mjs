@@ -1,7 +1,7 @@
 // Dados 100% inventados. Rodar: node --test tests/
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { consolidar, resultado, entradasNaoExplicadas } from '../js/calc.js';
+import { consolidar, resultado, entradasNaoExplicadas, duplicatasTrezor } from '../js/calc.js';
 import { parseCSV, parseNumero, parseData, detectarColunas, converter, classificarAtivo, classificarTipo, separarTabelas, converterTabelas, lerSaldos, conciliarSaldos } from '../js/csv.js';
 import { validarBtc, validarEth, extrairEntradas } from '../js/net.js';
 import * as cofre from '../js/vault.js';
@@ -370,4 +370,28 @@ test('entrada contada vira depósito e entra no total (sem custo, ou com custo s
   const com = consolidar([dep({ valor: 80, semCusto: false })], 'ETH');
   assert.equal(com.custo, 80);
   assert.ok(Math.abs(com.precoMedio - 80 / 0.00413273) < 1e-6);
+});
+
+// ---------- simplificações ----------
+test('depósito contado na Trezor que depois vira saque do extrato é detectado como duplicata', () => {
+  const saque = { id: 's1', tipo: 'saque', ativo: 'BTC', data: '2025-12-14T21:24:34.000Z', qtd: 0.0005, taxaQtd: 0 };
+  const dep = { id: 't:x', tipo: 'deposito', ativo: 'BTC', origem: 'trezor', data: '2025-12-14T21:34:00.000Z', qtd: 0.0005 };
+  assert.deepEqual(duplicatasTrezor([saque, dep]), ['t:x']);
+  // depósito de outra origem, outro ativo, ou muito depois do saque não é tocado
+  assert.deepEqual(duplicatasTrezor([saque, { ...dep, origem: 'manual' }]), []);
+  assert.deepEqual(duplicatasTrezor([saque, { ...dep, ativo: 'ETH' }]), []);
+  assert.deepEqual(duplicatasTrezor([saque, { ...dep, data: '2026-03-01T00:00:00.000Z' }]), []);
+  assert.deepEqual(duplicatasTrezor([saque, { ...dep, qtd: 0.004 }]), []);
+});
+
+test('um saque só desfaz uma duplicata', () => {
+  const saque = { id: 's1', tipo: 'saque', ativo: 'BTC', data: '2025-12-14T21:24:34.000Z', qtd: 0.0005 };
+  const mk = (id) => ({ id, tipo: 'deposito', ativo: 'BTC', origem: 'trezor', data: '2025-12-14T21:34:00.000Z', qtd: 0.0005 });
+  assert.equal(duplicatasTrezor([saque, mk('t:a'), mk('t:b')]).length, 1);
+});
+
+test('entrada ignorada não volta a aparecer', () => {
+  const e = { txid: 'tX', ts: 1731291791000, qtd: 0.004 };
+  assert.equal(entradasNaoExplicadas([e], [], 'ETH').length, 1);
+  assert.equal(entradasNaoExplicadas([e], [], 'ETH', ['tX']).length, 0);
 });

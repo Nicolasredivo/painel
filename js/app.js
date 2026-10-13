@@ -1,6 +1,6 @@
 import { h, fmtBRL, fmtPct, fmtQtd, fmtDataHora, fmtHora, sinal, seta, MASK } from './util.js';
 import * as cofre from './vault.js';
-import { consolidar, resultado, entradasNaoExplicadas } from './calc.js';
+import { consolidar, resultado, entradasNaoExplicadas, duplicatasTrezor } from './calc.js';
 import { parseCSV, parseNumero, detectarColunas, converter, separarTabelas, converterTabelas, lerSaldos, conciliarSaldos, CAMPOS } from './csv.js';
 import { buscarPrecos, consultarSaldo, validarBtc, validarEth } from './net.js';
 
@@ -36,7 +36,7 @@ function lerPrecosCache() {
 
 const estadoVazio = () => ({
   v: 1,
-  cfg: { btc: '', eth: '', auto: true, esconder: false, lockMin: 5, ultimoBackup: null },
+  cfg: { btc: '', eth: '', auto: true, esconder: false, lockMin: 5, ultimoBackup: null, ignorados: [] },
   lancs: [],
 });
 
@@ -205,20 +205,20 @@ function secaoTrezor(dados, R) {
         estado.cfg.esconder ? MASK : `${fmtQtd(s.saldo)} ${a} (${fmtBRL(s.saldo * p)})`));
       if (s.pendente) linhas.push(h('div', { class: 'ok' },
         `${s.pendente > 0 ? '+' : ''}${estado.cfg.esconder ? MASK : fmtQtd(s.pendente) + ' ' + a} a caminho, aguardando confirmação na rede`));
-      const novas = entradasNaoExplicadas(s.entradas || [], estado.lancs, a);
+      const novas = entradasNaoExplicadas(s.entradas || [], estado.lancs, a, estado.cfg.ignorados || []);
       if (novas.length) {
         const soma = novas.reduce((x, e) => x + e.qtd, 0);
         const quando = novas.map((e) => new Date(e.ts).toLocaleDateString('pt-BR')).join(', ');
         linhas.push(h('div', { class: 'concil' },
-          h('span', {}, `Chegou na Trezor ${estado.cfg.esconder ? MASK : fmtQtd(soma)} ${a} (${quando}) que nenhum saque do extrato explica, então não está no total.`),
-          h('button', { type: 'button', onclick: () => abrirContarTrezor(a, novas) }, 'Contar no total')));
+          h('span', {}, `Chegou ${estado.cfg.esconder ? MASK : fmtQtd(soma)} ${a} na sua Trezor (${quando}) e não veio de um saque da Bity. É seu?`),
+          h('button', { type: 'button', onclick: () => abrirContarTrezor(a, novas) }, 'Ver')));
       }
       const enviado = dados[a].c.enviado;
       const taxasSaque = estado.lancs.filter((l) => l.ativo === a && l.tipo === 'saque').reduce((x, l) => x + (l.taxaQtd || 0), 0);
       const contado = estado.lancs.filter((l) => l.ativo === a && l.origem === 'trezor').reduce((x, l) => x + l.qtd, 0);
       const dif = s.saldo - (enviado - taxasSaque + contado);
-      if (!novas.length && enviado + contado > 0 && Math.abs(dif) > 1e-8) linhas.push(h('div', { class: 'mut' },
-        `Saques no extrato somam ${estado.cfg.esconder ? MASK : fmtQtd(enviado)}; na Trezor há ${estado.cfg.esconder ? MASK : fmtQtd(s.saldo)}. A diferença pode ser saque para outro destino, taxa de rede ou saque ainda não feito.`));
+      if (enviado + contado > 0 && dif < -1e-8 && !s.pendente) linhas.push(h('div', { class: 'mut' },
+        `Ainda faltam ${estado.cfg.esconder ? MASK : fmtQtd(-dif)} ${a} chegar na Trezor (saque a caminho ou ainda não feito).`));
       linhas.push(h('small', { class: 'mut' }, 'conferido às ' + fmtHora(s.ts)));
     }
     if (e) linhas.push(h('div', { class: 'aviso-linha' }, `Sem resposta do servidor da Trezor agora (${e}). Tentando de novo.`));
@@ -337,6 +337,16 @@ async function atualizarPrecos() {
   }
 }
 
+async function limparDuplicatas() {
+  if (!estado) return;
+  const ids = new Set(duplicatasTrezor(estado.lancs));
+  if (!ids.size) return;
+  estado.lancs = estado.lancs.filter((l) => !ids.has(l.id));
+  await persistir();
+  render();
+  aviso(ids.size > 1 ? `${ids.size} entradas contadas em dobro foram unidas ao saque do extrato.` : 'Uma entrada contada em dobro foi unida ao saque do extrato.');
+}
+
 async function atualizarSaldos() {
   const cfg = estado.cfg;
   proxSaldo = Date.now() + 2 * MIN;
@@ -383,6 +393,7 @@ function iniciar() {
   checarVersao();
   render();
   tick();
+  limparDuplicatas();
 }
 
 function bloquear() {
@@ -505,6 +516,7 @@ function abrirImportar() {
             else estado.lancs.push({ ...t });
           }
           await persistir(); render(); d.close();
+          limparDuplicatas();
           aviso(`Importado: ${descreve(novos.length, taxasEscolhidas.length)}. Faça um backup em ⚙.`);
         },
       }, total ? `Importar ${descreve(novos.length, taxasEscolhidas.length)}` : 'Nada novo para importar'));
@@ -561,7 +573,12 @@ function abrirContarTrezor(a, novas) {
     e,
     custo: h('input', { type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: 'R$ no total (vazio = não sei)' }),
   }));
-  const d = dialogo('Contar na Trezor', h('form', {
+  const ignorar = async () => {
+    estado.cfg.ignorados = [...new Set([...(estado.cfg.ignorados || []), ...novas.map((e) => e.txid)])];
+    await persistir(); render(); d.close();
+    aviso('Ignorado. Não aparece mais.');
+  };
+  const d = dialogo('Entrada na Trezor', h('form', {
     onsubmit: async (ev) => {
       ev.preventDefault();
       for (const { e, custo } of linhas) {
@@ -575,9 +592,11 @@ function abrirContarTrezor(a, novas) {
       aviso('Entrada contada no total.');
     },
   },
-  h('p', { class: 'mut' }, 'Estas entradas chegaram na sua Trezor e não vêm de nenhum saque do extrato. Ao contar, entram na quantidade total. Se souber quanto pagou (total em R$, taxas incluídas), informe; se não, deixe vazio e ficam fora do preço médio — dá para informar depois pelo ✎.'),
+  h('p', { class: 'mut' }, 'Chegou na sua Trezor e não veio de um saque da Bity. Se foi você que comprou ou recebeu, conte no total e informe quanto pagou (em R$, com taxas); se não souber, deixe vazio. Se você não reconhece, ignore: pode ser golpe de envio de valor mínimo.'),
   linhas.map(({ e, custo }) => campo(`${fmtDataHora(new Date(e.ts).toISOString())} · ${fmtQtd(e.qtd)} ${a}`, custo)),
-  h('button', { type: 'submit', class: 'primario' }, 'Contar no total')));
+  h('div', { class: 'duas-acoes' },
+    h('button', { type: 'submit', class: 'primario' }, 'É meu — contar'),
+    h('button', { type: 'button', class: 'perigo', onclick: ignorar }, 'Não conheço — ignorar'))));
 }
 
 // ---------- custo de um depósito ----------

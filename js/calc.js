@@ -78,8 +78,8 @@ export function consolidar(lancs, ativo) {
 
 // Entradas na Trezor que nenhum saque do extrato explica e que ainda não viraram lançamento.
 // Cada saque "casa" com uma entrada: chega o valor cheio (taxa cobrada por fora) ou um pouco menos (taxa descontada, até 2%).
-export function entradasNaoExplicadas(entradas, lancs, ativo) {
-  const jaRegistradas = new Set(lancs.map((l) => l.id));
+export function entradasNaoExplicadas(entradas, lancs, ativo, ignorados = []) {
+  const jaRegistradas = new Set([...lancs.map((l) => l.id), ...ignorados.map((x) => 't:' + x)]);
   const livres = [...entradas].sort((a, b) => a.ts - b.ts);
   const saques = lancs.filter((l) => l.ativo === ativo && l.tipo === 'saque').sort((a, b) => (a.data < b.data ? -1 : 1));
   for (const s of saques) {
@@ -89,6 +89,20 @@ export function entradasNaoExplicadas(entradas, lancs, ativo) {
     if (i > -1) livres.splice(i, 1);
   }
   return livres.filter((e) => !jaRegistradas.has('t:' + e.txid));
+}
+
+// Depósitos que o usuário "contou" na Trezor e que depois se mostraram ser um saque do extrato (importado depois).
+// Devolve os ids a remover, para o mesmo bitcoin não ser contado duas vezes.
+export function duplicatasTrezor(lancs) {
+  const remover = [];
+  const usados = new Set();
+  for (const dep of lancs.filter((l) => l.tipo === 'deposito' && l.origem === 'trezor')) {
+    const par = lancs.find((s) => s.tipo === 'saque' && s.ativo === dep.ativo && !usados.has(s.id) &&
+      dep.qtd >= (s.qtd - (s.taxaQtd || 0)) * 0.98 - 1e-12 && dep.qtd <= s.qtd * (1 + 1e-9) + 1e-12 &&
+      dep.data >= s.data && Date.parse(dep.data) - Date.parse(s.data) <= 3 * 864e5);
+    if (par) { usados.add(par.id); remover.push(dep.id); }
+  }
+  return remover;
 }
 
 // Valor de hoje x o que foi pago. O resultado considera só o grupo com custo conhecido.
