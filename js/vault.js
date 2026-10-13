@@ -69,16 +69,42 @@ export async function trocarSenha(novaSenha, estado) {
   return criar(novaSenha, estado);
 }
 
-// --- Armazenamento local (só o envelope cifrado) ---
-export function existe() {
-  try { return !!localStorage.getItem(CHAVE_LS); } catch { return false; }
+// --- Armazenamento local (só envelopes cifrados + a lista de nomes dos cofres) ---
+// O primeiro cofre ("principal") continua na chave antiga, então quem já tinha um cofre não precisa migrar nada.
+// Os nomes dos cofres ficam em texto claro (aparecem na tela de entrada): use nomes neutros.
+const CHAVE_LISTA = 'painel.cofres.v1';
+const chaveEnv = (id) => (id === 'principal' ? CHAVE_LS : CHAVE_LS + '.' + id);
+
+export function listar() {
+  let lista = [];
+  try {
+    const l = JSON.parse(localStorage.getItem(CHAVE_LISTA));
+    if (Array.isArray(l)) lista = l.filter((c) => c && typeof c.id === 'string' && typeof c.nome === 'string');
+  } catch { /* lista ausente ou corrompida */ }
+  try {
+    if (!lista.some((c) => c.id === 'principal') && localStorage.getItem(CHAVE_LS)) lista.unshift({ id: 'principal', nome: 'Principal' });
+  } catch { /* sem armazenamento */ }
+  return lista;
 }
-export function ler() {
-  try { return JSON.parse(localStorage.getItem(CHAVE_LS)); } catch { return null; }
+function gravarLista(lista) { localStorage.setItem(CHAVE_LISTA, JSON.stringify(lista)); }
+
+export const existe = () => listar().length > 0;
+export const novoId = () => (listar().length === 0 ? 'principal' : crypto.randomUUID().slice(0, 8));
+
+export function registrar(id, nome) {
+  gravarLista([...listar().filter((c) => c.id !== id), { id, nome }]);
 }
-export function guardar(envelope) {
-  localStorage.setItem(CHAVE_LS, JSON.stringify(envelope));
+export function renomear(id, nome) {
+  gravarLista(listar().map((c) => (c.id === id ? { ...c, nome } : c)));
 }
-export function apagarTudo() {
-  try { localStorage.removeItem(CHAVE_LS); } catch { /* sem armazenamento: nada a apagar */ }
+export function ler(id) {
+  try { return JSON.parse(localStorage.getItem(chaveEnv(id))); } catch { return null; }
+}
+export function guardar(id, envelope) {
+  localStorage.setItem(chaveEnv(id), JSON.stringify(envelope));
+}
+export function apagar(id) {
+  const restantes = listar().filter((c) => c.id !== id);
+  try { localStorage.removeItem(chaveEnv(id)); } catch { /* nada a apagar */ }
+  gravarLista(restantes);
 }

@@ -13,6 +13,9 @@ const CHAVE_PRECOS = 'painel.precos';
 let estado = null;          // dados descriptografados: só existem na memória enquanto destravado
 let sessao = null;
 let envelopePendente = null; // backup escolhido, aguardando a senha dele
+let alvoRestaurar = null;    // id do cofre que o backup vai substituir, ou 'novo'
+let cofreAtual = null;       // id do cofre selecionado / aberto
+let criandoNovo = false;     // tela de criar mais um cofre
 let precos = lerPrecosCache();
 let precosErro = null;
 let precosAtualizando = false;
@@ -48,7 +51,7 @@ function normalizar(e) {
 let fila = Promise.resolve();
 function persistir() {
   fila = fila
-    .then(async () => { if (sessao && estado) cofre.guardar(await cofre.selar(sessao, estado)); })
+    .then(async () => { if (sessao && estado) cofre.guardar(cofreAtual, await cofre.selar(sessao, estado)); })
     .catch(() => aviso('Não consegui salvar neste aparelho. Faça um backup agora.'));
   return fila;
 }
@@ -77,6 +80,8 @@ const campo = (rotulo, input, dica) =>
 
 // ---------- telas de entrada ----------
 function telaCriar() {
+  const jaTem = cofre.listar().length > 0;
+  const nome = h('input', { type: 'text', value: jaTem ? '' : 'Principal', maxlength: 30, required: true, placeholder: 'Ex.: Mãe', autocomplete: 'off' });
   const senha = h('input', { type: 'password', autocomplete: 'new-password', required: true, placeholder: 'Frase longa, 10+ caracteres' });
   const conf = h('input', { type: 'password', autocomplete: 'new-password', required: true, placeholder: 'Repita a senha' });
   const msg = h('p', { class: 'erro', role: 'alert' });
@@ -90,7 +95,10 @@ function telaCriar() {
       btn.disabled = true; btn.textContent = 'Criando…'; msg.textContent = '';
       const novo = estadoVazio();
       const r = await cofre.criar(senha.value, novo);
-      cofre.guardar(r.envelope);
+      const id = cofre.novoId();
+      cofre.guardar(id, r.envelope);
+      cofre.registrar(id, nome.value.trim() || 'Cofre');
+      cofreAtual = id; criandoNovo = false; lembrarCofre();
       try { await navigator.storage?.persist?.(); } catch { /* opcional */ }
       sessao = r.sessao; estado = novo;
       iniciar();
@@ -99,11 +107,13 @@ function telaCriar() {
   h('h1', {}, 'Painel'),
   h('p', {}, 'Crie uma senha para o cofre. Tudo que você lançar aqui fica cifrado com ela, só neste aparelho.'),
   h('p', { class: 'mut' }, 'A senha não é guardada em lugar nenhum. Se esquecer, só um backup + a mesma senha recupera os dados.'),
+  campo('Nome do cofre', nome, 'Aparece na tela de entrada (não é secreto). Use um nome neutro.'),
   campo('Senha', senha), campo('Repetir senha', conf), msg, btn,
-  botaoRestaurar());
+  botaoRestaurar('novo'),
+  jaTem ? h('button', { type: 'button', class: 'link', onclick: () => { criandoNovo = false; render(); } }, 'Voltar') : null);
 }
 
-function botaoRestaurar() {
+function botaoRestaurar(alvo) {
   const arq = h('input', {
     type: 'file', accept: '.json,application/json', class: 'oculto',
     onchange: async () => {
@@ -112,7 +122,7 @@ function botaoRestaurar() {
       try {
         const env = JSON.parse(await f.text());
         if (!cofre.envelopeValido(env)) throw new Error();
-        envelopePendente = env; render();
+        envelopePendente = env; alvoRestaurar = alvo || cofreAtual; render();
       } catch { aviso('Esse arquivo não parece um backup deste painel.'); }
     },
   });
@@ -121,6 +131,11 @@ function botaoRestaurar() {
 }
 
 function telaEntrar() {
+  const lista = cofre.listar();
+  const novoDoBackup = envelopePendente && alvoRestaurar === 'novo';
+  const nomeNovo = h('input', { type: 'text', maxlength: 30, required: true, placeholder: 'Ex.: Mãe', autocomplete: 'off' });
+  const seletor = h('select', { 'aria-label': 'Cofre', onchange: () => { cofreAtual = seletor.value; lembrarCofre(); render(); } },
+    lista.map((c) => h('option', { value: c.id, selected: c.id === cofreAtual }, c.nome)));
   const senha = h('input', { type: 'password', autocomplete: 'current-password', required: true, placeholder: 'Senha', autofocus: true });
   const msg = h('p', { class: 'erro', role: 'alert' });
   const btn = h('button', { type: 'submit', class: 'primario' }, 'Entrar');
@@ -130,8 +145,15 @@ function telaEntrar() {
       e.preventDefault();
       msg.textContent = ''; btn.disabled = true; btn.textContent = 'Abrindo…';
       try {
-        const r = await cofre.abrir(senha.value, envelopePendente || cofre.ler());
-        if (envelopePendente) { cofre.guardar(envelopePendente); envelopePendente = null; }
+        const alvo = novoDoBackup ? cofre.novoId() : (envelopePendente ? alvoRestaurar : cofreAtual);
+        const r = await cofre.abrir(senha.value, envelopePendente || cofre.ler(cofreAtual));
+        if (envelopePendente) {
+          cofre.guardar(alvo, envelopePendente);
+          if (novoDoBackup) cofre.registrar(alvo, nomeNovo.value.trim() || 'Cofre');
+          envelopePendente = null; alvoRestaurar = null;
+        }
+        cofreAtual = alvo;
+        lembrarCofre();
         sessao = r.sessao; estado = normalizar(r.estado);
         senha.value = '';
         iniciar();
@@ -142,20 +164,33 @@ function telaEntrar() {
     },
   },
   h('h1', {}, 'Painel'),
-  envelopePendente ? h('p', { class: 'ok' }, 'Backup carregado. Digite a senha dele para entrar — isso substitui os dados deste aparelho.') : null,
+  envelopePendente
+    ? h('p', { class: 'ok' }, novoDoBackup
+      ? 'Backup carregado. Dê um nome ao cofre e digite a senha dele: vira um cofre novo, sem mexer nos outros.'
+      : `Backup carregado. Digite a senha dele para entrar — isso substitui os dados do cofre "${(lista.find((c) => c.id === alvoRestaurar) || {}).nome || ''}".`)
+    : null,
+  novoDoBackup ? campo('Nome do cofre', nomeNovo) : null,
+  !envelopePendente && lista.length > 1 ? campo('Cofre', seletor) : null,
   campo('Senha', senha), msg, btn,
   h('div', { class: 'rodape-entrada' },
     envelopePendente
-      ? h('button', { type: 'button', class: 'link', onclick: () => { envelopePendente = null; render(); } }, 'Cancelar restauração')
+      ? h('button', { type: 'button', class: 'link', onclick: () => { envelopePendente = null; alvoRestaurar = null; render(); } }, 'Cancelar restauração')
       : botaoRestaurar(),
-    h('button', { type: 'button', class: 'link perigo', onclick: apagarTudo }, 'Apagar tudo')));
+    envelopePendente ? null : h('button', { type: 'button', class: 'link', onclick: () => { criandoNovo = true; render(); } }, '＋ Novo cofre'),
+    envelopePendente ? null : h('button', { type: 'button', class: 'link perigo', onclick: apagarTudo }, 'Apagar este cofre')));
+}
+
+function lembrarCofre() {
+  try { localStorage.setItem('painel.ultimo', cofreAtual || ''); } catch { /* sem armazenamento */ }
 }
 
 function apagarTudo() {
-  if (!confirm('Apagar TODOS os dados deste aparelho? Só dá para recuperar com um backup.')) return;
+  const nome = (cofre.listar().find((c) => c.id === cofreAtual) || {}).nome || 'este';
+  if (!confirm(`Apagar o cofre "${nome}" e todos os dados dele neste aparelho? Os outros cofres não são afetados. Só dá para recuperar com um backup.`)) return;
   if (!confirm('Última confirmação: apagar mesmo?')) return;
-  cofre.apagarTudo();
-  estado = null; sessao = null; envelopePendente = null;
+  cofre.apagar(cofreAtual);
+  cofreAtual = null;
+  estado = null; sessao = null; envelopePendente = null; alvoRestaurar = null; criandoNovo = false;
   document.querySelectorAll('dialog').forEach((d) => d.remove());
   render();
 }
@@ -292,7 +327,7 @@ function painel() {
 
   return h('div', { class: 'pagina' },
     h('header', { class: 'topo' },
-      h('h1', {}, 'Painel'),
+      h('h1', {}, 'Painel', cofre.listar().length > 1 ? h('small', { class: 'mut nome-cofre' }, ' · ' + ((cofre.listar().find((c) => c.id === cofreAtual) || {}).nome || '')) : null),
       h('div', { class: 'acoes' },
         h('button', { class: 'icone', type: 'button', 'aria-label': esc ? 'Mostrar valores' : 'Ocultar valores', title: esc ? 'Mostrar valores' : 'Ocultar valores',
           onclick: async () => { estado.cfg.esconder = !esc; await persistir(); render(); } }, esc ? '🙈' : '👁'),
@@ -320,7 +355,15 @@ function painel() {
 
 function render() {
   raiz.replaceChildren();
-  if (!estado) raiz.append(!cofre.existe() && !envelopePendente ? telaCriar() : telaEntrar());
+  if (!estado) {
+    const lista = cofre.listar();
+    if (!lista.some((c) => c.id === cofreAtual)) {
+      let ultimo = null;
+      try { ultimo = localStorage.getItem('painel.ultimo'); } catch { /* sem armazenamento */ }
+      cofreAtual = (lista.find((c) => c.id === ultimo) || lista[0] || {}).id || null;
+    }
+    raiz.append((lista.length === 0 || criandoNovo) && !envelopePendente ? telaCriar() : telaEntrar());
+  }
   else raiz.append(painel());
 }
 
@@ -632,6 +675,7 @@ function abrirConfig() {
   const nova = h('input', { type: 'password', autocomplete: 'new-password', placeholder: 'Nova senha (10+ caracteres)' });
   const nova2 = h('input', { type: 'password', autocomplete: 'new-password', placeholder: 'Repita a nova senha' });
   const msgSenha = h('p', { class: 'erro', role: 'alert' });
+  const nomeCofre = h('input', { type: 'text', maxlength: 30, required: true, autocomplete: 'off', value: (cofre.listar().find((c) => c.id === cofreAtual) || {}).nome || '' });
 
   const d = dialogo('Configurações', [
     h('form', {
@@ -665,7 +709,7 @@ function abrirConfig() {
         if (nova.value.length < 10) { msgSenha.textContent = 'Use pelo menos 10 caracteres.'; return; }
         if (nova.value !== nova2.value) { msgSenha.textContent = 'As senhas não são iguais.'; return; }
         const r = await cofre.trocarSenha(nova.value, estado);
-        cofre.guardar(r.envelope); sessao = r.sessao;
+        cofre.guardar(cofreAtual, r.envelope); sessao = r.sessao;
         nova.value = ''; nova2.value = ''; msgSenha.textContent = '';
         aviso('Senha trocada. Backups antigos continuam com a senha antiga.');
       },
@@ -673,10 +717,26 @@ function abrirConfig() {
     h('h3', {}, 'Trocar senha'), nova, nova2, msgSenha,
     h('button', { type: 'submit' }, 'Trocar senha')),
 
+    h('form', {
+      class: 'bloco',
+      onsubmit: (e) => {
+        e.preventDefault();
+        const novo = nomeCofre.value.trim();
+        if (!novo) return;
+        cofre.renomear(cofreAtual, novo);
+        render();
+        aviso('Nome do cofre atualizado.');
+      },
+    },
+    h('h3', {}, 'Nome deste cofre'),
+    h('p', { class: 'mut' }, 'Aparece na tela de entrada, sem senha. Use um nome neutro.'),
+    nomeCofre,
+    h('button', { type: 'submit' }, 'Renomear')),
+
     h('div', { class: 'bloco' },
       h('h3', {}, 'Sobre'),
       h('p', { class: 'mut' }, `Versão ${versaoInicial || '—'}. O app se atualiza sozinho ao abrir com internet. Fontes de dados: CoinGecko (preços) e servidores da Trezor (saldo). Nenhum outro destino é permitido.`),
-      h('button', { type: 'button', class: 'perigo', onclick: apagarTudo }, 'Apagar tudo neste aparelho')),
+      h('button', { type: 'button', class: 'perigo', onclick: apagarTudo }, 'Apagar este cofre')),
   ], true);
 }
 

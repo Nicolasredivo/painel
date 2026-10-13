@@ -409,3 +409,44 @@ test('taxa de saque fixa e alta (≈11% do sacado) é aceita como taxa; diferen�
   assert.equal(ruim.taxas.length, 0);
   assert.match(ruim.avisos[0], /diferença grande/);
 });
+
+// ---------- vários cofres ----------
+function armazenamentoFalso() {
+  const m = new Map();
+  globalThis.localStorage = { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) };
+  return m;
+}
+
+test('cofre antigo vira "Principal" sem migrar nada; segundo cofre é independente', async () => {
+  const m = armazenamentoFalso();
+  const a = await cofre.criar('senha longa do cofre A', { v: 1, nome: 'A' });
+  m.set('painel.cofre.v1', JSON.stringify(a.envelope));                 // como já está no aparelho do dono
+  assert.deepEqual(cofre.listar(), [{ id: 'principal', nome: 'Principal' }]);
+  const b = await cofre.criar('senha longa do cofre B', { v: 1, nome: 'B' });
+  const id = cofre.novoId();
+  assert.notEqual(id, 'principal');
+  cofre.guardar(id, b.envelope); cofre.registrar(id, 'Mãe');
+  assert.deepEqual(cofre.listar().map((c) => c.nome), ['Principal', 'Mãe']);
+  // cada senha abre só o seu
+  assert.equal((await cofre.abrir('senha longa do cofre A', cofre.ler('principal'))).estado.nome, 'A');
+  assert.equal((await cofre.abrir('senha longa do cofre B', cofre.ler(id))).estado.nome, 'B');
+  await assert.rejects(cofre.abrir('senha longa do cofre A', cofre.ler(id)), /senha-errada/);
+  // renomear e apagar um não toca no outro
+  cofre.renomear(id, 'Mamãe');
+  assert.equal(cofre.listar()[1].nome, 'Mamãe');
+  cofre.apagar(id);
+  assert.deepEqual(cofre.listar().map((c) => c.id), ['principal']);
+  assert.ok(cofre.ler('principal'));
+  assert.equal(cofre.ler(id), null);
+});
+
+test('primeiro cofre de um aparelho novo usa o id "principal"; apagar o principal não o ressuscita', async () => {
+  armazenamentoFalso();
+  assert.equal(cofre.existe(), false);
+  assert.equal(cofre.novoId(), 'principal');
+  const a = await cofre.criar('senha longa do cofre A', { v: 1 });
+  cofre.guardar('principal', a.envelope); cofre.registrar('principal', 'Eu');
+  cofre.apagar('principal');
+  assert.equal(cofre.existe(), false);
+  assert.deepEqual(cofre.listar(), []);
+});
